@@ -145,13 +145,15 @@ def mandelbrot_cuda(xarr, yarr, nmax, nblocks=512):
 ########## high precision Variante ##########
 # verwendet hochpräzisionszahlen für x und y
 from numba.typed import List
-@myjit
+@myjit(nopython=False)
 def f_highprecision(cx, cy, nmax):
     '''Mandelbrot iteration with high precision numbers.
     Accepts x and y as mpf numbers. Returns the series z_n.
     '''
-    zre, zim = 0.*cx, 0.*cy
-    #re, im = x, y
+    ###zre, zim = 0.*cx, 0.*cy
+    zre, zim = cx, cy
+    zre = 0*zre
+    zim = 0*zim
     series = []
     ## series_derv = [] # derivative in c: dz_(i+1)/dc = 2*z_i*(dz_i/dc) + 1
     for n in range(nmax):
@@ -162,7 +164,7 @@ def f_highprecision(cx, cy, nmax):
             pseudo_n = n - log2(ln(r))
             #pseudo_n = n - mpmath.log(mpmath.log(r))/mpmath.log(2)
             return pseudo_n, series
-    return nmax, series
+    return nmax, np.array(series)
 
 
 ########## By Reference ##########
@@ -202,6 +204,9 @@ def f_byreference(delx, dely, nmax, series):
 
 @myjit
 def mandel_byreference(xarr, yarr, nmax, series):
+    '''Calculates the mandelbrot figure by using a reference series (create it using f_highprecision).
+    Using a reference series simulates high precision while still using double precision.
+    '''
     N, M = xarr.shape
     mandel = np.zeros((N, M))
     for i in range(N):
@@ -210,12 +215,71 @@ def mandel_byreference(xarr, yarr, nmax, series):
             mandel[i,j] = f_byreference(cx, cy, nmax, series)
     return mandel
 
-'''
+
 @cuda.jit
-def _mandel_byreference_cuda(xarr, yarr, nmax, series):
-    mandel = np.empty((len(xarr), len(yarr)))
-    for i in range(len(xarr)):
-        for j in range(len(yarr)):
-            mandel[i,j] = f_byreference(xarr[i,j], yarr[i,j], nmax, series)
-    return mandel''';
+def _mandel_byreference_cuda(xarr, yarr, nmax, series, res_mandel):
+    '''Like `mandel_byreference` but on cuda devic
+    Expects flattened xarr and yarr, and result will be also flattened
+    '''
+    N = len(xarr)
+    ## requires: res_mandel = np.empty((N, M))
+    
+    tidx = cuda.threadIdx.x
+    bidx = cuda.blockIdx.x
+    bdim = cuda.blockDim.x
+    widx = bidx*bdim + tidx
+    
+    if widx > N:
+        return
+    
+    
+    #### This is f_byreference ####
+    delx, dely = xarr[widx], yarr[widx]
+    
+    re, im = 0, 0
+    for n in range(nmax):
+        if n >= len(series)-1: break
+        ref_re, ref_im = series[n]
+        re, im = 2*(re*ref_re-im*ref_im) + (re**2-im**2) + delx,  2*(im*ref_re+re*ref_im) + (2*re*im) + dely
+        if re**2+im**2 > 1e-4: break # go on normal
+    # transform back to absolute coordinates instead of relative
+    re = re + series[n+1][0]
+    im = im + series[n+1][1]
+    cx = series[1][0] + delx   # add the c of the reference (which is the 1st entry in the series)
+    cy = series[1][1] + dely
+    
+    ### This is f_resume ###
+    pseudo_n = nmax
+    zre, zim = re, im
+    nstart = n
+    for n in range(nstart, nmax):
+        zre, zim = zre**2-zim**2 + cx, 2*zre*zim + cy
+        if zre**2+zim**2 > bound:
+            r = zre**2+zim**2
+            #pseudo_n = n - log2(ln(r))
+            pseudo_n = ( n - cmath.log(cmath.log(r))/cmath.log(2) ).real
+            break
+        
+    ### Save this value ###
+    res_mandel[widx] = pseudo_n
+    
+    
+    
+def mandel_byreference_cuda(xarr, yarr, nmax, series):
+    '''Determines the escape time for each point in the meshgrid of xarr, yarr.
+    Wraps the actual cuda function
+    '''
+    shape = xarr.shape
+    xarr = xarr.flatten()
+    yarr = yarr.flatten()
+    N = len(xarr)
+    res_mandel = np.zeros_like(xarr)
+    _mandel_byreference_cuda[int(np.ceil(N/512)), 512](xarr, yarr, nmax, np.array(series), res_mandel)
+    return res_mandel.reshape(shape)
+    
+    
+    
+    
+    
+    
     
