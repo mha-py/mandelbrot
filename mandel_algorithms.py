@@ -4,11 +4,8 @@ Several functions for computing the mandelbrot sets pixel values.
 - Cuda implementation
 - Reference series based iteration
 - (todo) Derivatives del z / del c
-(c) 20.8.2020 mha
+(c) 28.8.2020 mha
 
-TODO: - mandel_byreference: spinnt. 
-      - bei allen funktionen: wenn nicht gebreakt wird, dann n füllen in array
-      - ......
 '''
 
 import numpy as np
@@ -37,29 +34,33 @@ def meshgrid(xarr, yarr):
     return x_arr, y_arr
 
 
-########## legacy ##########
-'''
-# basis implementation (f nicht inline)
-@njit
-def f(cx, cy, nmax):
-    'Escape time for point (cx, cy)'
-    re, im = 0, 0
-    for n in range(nmax):
-        re, im = re**2-im**2 + cx, 2*re*im + cy
-        if re**2+im**2 > bound:
-            r = re**2+im**2
-            pseudo_n = n - log2(ln(r))
-            return pseudo_n
-    return n
+def mesh_antialiased(width, sx, sy, middle):
+    '''Creates a grid compatible with antialiasing
+    '''
+    # Coordinates, y-coordinate has factor 4
+    sy *= 4
+    xarr = (np.arange(sx) - sx/2)/sx + 1e-6 # dont hit exactly the middle (necessary?)
+    yarr = (np.arange(sy) - sy/2)/sx + 1e-6
 
-@jit
-def mandelbrot_slow(xarr, yarr, nmax):
-    'Determines the escape time for each point in the meshgrid of xarr, yarr'
-    mandel = np.empty((len(xarr), len(yarr)))
-    for i in range(len(xarr)):
-        for j in range(len(yarr)):
-            mandel[i,j] = f(xarr[i], yarr[j], nmax)
-    return np.array(mandel)''';
+    # Create meshgrid: xarr[i] and yarr[j] become xarr[i,j] and yarr[i,j]
+    xarr, yarr = meshgrid(xarr, yarr)
+    
+    # Shift the x coordinates to get the right antialiasing sample points
+    pxsize = width/sx
+    xarr[:, 0::4] += - 1/8 * pxsize
+    xarr[:, 1::4] += + 3/8 * pxsize
+    xarr[:, 2::4] += - 3/8 * pxsize
+    xarr[:, 3::4] += + 1/8 * pxsize
+    
+    return xarr, yarr
+
+
+def antialias(array):
+    '''Takes the mean of 4 sample points to get antialiasing effect.
+    This function works on images that coordinates come from `mesh_antialiased`.
+    '''
+    sx, sy = array.shape
+    return array.reshape((sx, sy//4, 4)).mean(-1)  # subpixels were stored in four y values
 
 
 
@@ -82,6 +83,7 @@ def mandelbrot_mesh(xarr, yarr, nmax):
                     mandel[i,j] = pseudo_n
                     break
     return mandel
+
 
 @myjit
 def mandelbrot(xarr, yarr, nmax):
@@ -131,6 +133,7 @@ def _mandelbrot_cuda(xarr, yarr, nmax, res_mandel):
             pseudo_n = ( n - cmath.log(cmath.log(r))/cmath.log(2) ).real
             res_mandel[i,j] = pseudo_n
             break
+                
                 
 def mandelbrot_cuda(xarr, yarr, nmax, nblocks=512):
     '''Determines the escape time for each point in the meshgrid of xarr, yarr.
@@ -185,6 +188,7 @@ def _f_resume(cx, cy, nstart, nmax, zx, zy):
             return pseudo_n
     return nmax
 
+
 @myjit
 def f_byreference(delx, dely, nmax, series):
     '''Calculates the series by using the difference del z = z - z^bar.
@@ -201,6 +205,7 @@ def f_byreference(delx, dely, nmax, series):
     cx = series[1][0] + delx   # add the c of the reference (which is the 1st entry in the series)
     cy = series[1][1] + dely
     return _f_resume(cx, cy, n, nmax, re, im)
+
 
 @myjit
 def mandel_byreference(xarr, yarr, nmax, series):
