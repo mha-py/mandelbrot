@@ -145,29 +145,73 @@ def mandelbrot_cuda(xarr, yarr, nmax, nblocks=512):
 
 
 
+
 ########## high precision Variante ##########
 # verwendet hochpräzisionszahlen für x und y
-from numba.typed import List
 @myjit(nopython=False)
 def f_highprecision(cx, cy, nmax):
     '''Mandelbrot iteration with high precision numbers.
     Accepts x and y as mpf numbers. Returns the series z_n.
+    Formulas:
+    z0 <- z0**2+c
+    z1 <- 2*z0*z1+1
+    z2 <- 2*z0*z2+z1**2
+    z3 <- 2*z0*z3+2*z1*z2
+    z4 <- 2*z0*z4+2*z0*z3+z2**2
+    with zi the ith derivative of z(c) (actually there is still a faculty factor).
     '''
-    ###zre, zim = 0.*cx, 0.*cy
-    zre, zim = cx, cy
-    zre = 0*zre
-    zim = 0*zim
+    z0re, z0im = cx, cy
+    z0re = 0*z0re
+    z0im = 0*z0im
+    z1re = z0re
+    z1im = z0im
+    z2re = z0re
+    z2im = z0im
+    z3re = z0re
+    z3im = z0im
     series = []
-    ## series_derv = [] # derivative in c: dz_(i+1)/dc = 2*z_i*(dz_i/dc) + 1
+    coeff1 = []
+    coeff2 = [] # stores second derivative of z(c)/2
+    coeff3 = [] #  stores third derivative of z(c)/6
+    
+    pseudo_n = nmax
     for n in range(nmax):
-        series.append((float(zre), float(zim)))
-        zre, zim = zre**2-zim**2 + cx, 2*zre*zim + cy
-        r = float(zre)**2 + float(zim)**2 # low precision is enough
+        series.append((float(z0re), float(z0im)))
+        coeff1.append((float(z1re), float(z1im)))
+        coeff2.append((float(z2re), float(z2im)))
+        coeff3.append((float(z3re), float(z3im)))
+        z0re, z0im = z0re**2-z0im**2 + cx, 2*z0re*z0im + cy
+        z1re, z1im = 2*(z0re*z1re-z0im*z1im) + 1, 2*(z0im*z1re+z0re*z1im)
+        z2re, z2im = 2*(z0re*z2re-z0im*z2im + z1re**2 - z1im**2), 2*(z0re*z2im+z0im*z2re + 2*z1re*z1im)
+        z3re, z3im = 2*(z0re*z3re-z0im*z3im + z1re*z2re-z1im*z2im), 2*(z0re*z3im+z0im*z3re + z1re*z2im+z1im*z2re)
+        
+        r = float(z0re)**2 + float(z0im)**2 # low precision is enough here
         if r > bound:
             pseudo_n = n - log2(ln(r))
-            #pseudo_n = n - mpmath.log(mpmath.log(r))/mpmath.log(2)
-            return pseudo_n, series
-    return nmax, np.array(series)
+            break
+        
+    return pseudo_n, np.array(series), np.array(coeff1), np.array(coeff2), np.array(coeff3)
+
+
+    
+def predevelope_xy(xarr, yarr, series, coeff1, coeff2, coeff3):
+    '''Uses the tailor expansion of a reference series to get a starting point for the mandelbrot iteration (without actually iterating -> fast)
+    xarr, yarr: Relative coordinates, offset to the reference series
+    series, der1 to der3: Reference series and its derivatives in c
+    '''
+    # Find out the maximal distance to the reference, w, and the iteration n for which the third order term becomes too big to have a good quadratic approximation
+    w = np.max(xarr**2+yarr**2)**(1/2)
+    for n in range(len(series)):
+        if np.linalg.norm(coeff3[n]) * w**3 >= 1e-5:
+            break
+    
+    d1 = coeff1[n,0] + 1j*coeff1[n,1]
+    d2 = coeff2[n,0] + 1j*coeff2[n,1]
+    zarr = xarr + 1j*yarr
+    zarr = d1*zarr + d2*zarr**2
+    return n, np.real(zarr), np.imag(zarr)
+
+
 
 
 ########## By Reference ##########
@@ -190,12 +234,14 @@ def _f_resume(cx, cy, nstart, nmax, zx, zy):
 
 
 @myjit
-def f_byreference(delx, dely, nmax, series):
+def f_byreference(delx, dely, nmax, series, nstart=0, xstart=None, ystart=None):
     '''Calculates the series by using the difference del z = z - z^bar.
     series: a list containing z^bar_i (get it by f_highprecision)'''
     #re, im = delx, dely
     re, im = 0, 0
-    for n in range(min(nmax, len(series)-1)):
+    if nstart > 0:
+        re, im = xstart, ystart
+    for n in range(nstart, min(nmax, len(series)-1)):
         ref_re, ref_im = series[n]
         re, im = 2*(re*ref_re-im*ref_im) + (re**2-im**2) + delx,  2*(im*ref_re+re*ref_im) + (2*re*im) + dely
         if re**2+im**2 > 1e-4: break # go on normal
@@ -222,7 +268,7 @@ def mandel_byreference(xarr, yarr, nmax, series):
 
 
 @cuda.jit
-def _mandel_byreference_cuda(xarr, yarr, nmax, series, res_mandel):
+def _mandel_byreference_cuda(xarr, yarr, nmax, series, nstart, xstart, ystart, res_mandel):
     '''Like `mandel_byreference` but on cuda devic
     Expects flattened xarr and yarr, and result will be also flattened
     '''
@@ -242,7 +288,10 @@ def _mandel_byreference_cuda(xarr, yarr, nmax, series, res_mandel):
     delx, dely = xarr[widx], yarr[widx]
     
     re, im = 0, 0
-    for n in range(nmax):
+    if nstart > 0:
+        re, im = xstart[widx], ystart[widx]
+    
+    for n in range(nstart, nmax):
         if n >= len(series)-1: break
         ref_re, ref_im = series[n]
         re, im = 2*(re*ref_re-im*ref_im) + (re**2-im**2) + delx,  2*(im*ref_re+re*ref_im) + (2*re*im) + dely
@@ -270,7 +319,7 @@ def _mandel_byreference_cuda(xarr, yarr, nmax, series, res_mandel):
     
     
     
-def mandel_byreference_cuda(xarr, yarr, nmax, series):
+def mandel_byreference_cuda(xarr, yarr, nmax, series, nstart=0, xstart=None, ystart=None):
     '''Determines the escape time for each point in the meshgrid of xarr, yarr.
     Wraps the actual cuda function
     '''
@@ -278,12 +327,16 @@ def mandel_byreference_cuda(xarr, yarr, nmax, series):
     xarr = xarr.flatten()
     yarr = yarr.flatten()
     N = len(xarr)
+    if nstart > 0:
+        xstart = xstart.flatten()
+        ystart = ystart.flatten()
+    else:
+        xstart = np.empty_like(xarr)
+        ystart = np.empty_like(yarr)
+        
     res_mandel = np.zeros_like(xarr)
-    _mandel_byreference_cuda[int(np.ceil(N/512)), 512](xarr, yarr, nmax, np.array(series), res_mandel)
+    _mandel_byreference_cuda[int(np.ceil(N/512)), 512](xarr, yarr, nmax, np.array(series), nstart, xstart, ystart, res_mandel)
     return res_mandel.reshape(shape)
-    
-    
-    
     
     
     
