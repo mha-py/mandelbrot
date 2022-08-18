@@ -13,6 +13,7 @@ from numba import jit, njit, prange, cuda
 import mpmath
 from mpmath import mpf, mpc
 import cmath
+from math import ceil
 
 
 bound = 20
@@ -34,7 +35,7 @@ def meshgrid(xarr, yarr):
     return x_arr, y_arr
 
 
-def mesh_antialiased(width, sx, sy, middle):
+def mesh_antialiased(width, sx, sy):
     '''Creates a grid compatible with antialiasing
     '''
     # Coordinates, y-coordinate has factor 4
@@ -135,11 +136,12 @@ def _mandelbrot_cuda(xarr, yarr, nmax, res_mandel):
             break
                 
                 
-def mandelbrot_cuda(xarr, yarr, nmax, nblocks=512):
+def mandelbrot_cuda(xarr, yarr, nmax):      ### , nblocks=512
     '''Determines the escape time for each point in the meshgrid of xarr, yarr.
     Wraps the actual cuda function
     '''
     res_mandel = np.zeros_like(xarr)
+    nblocks = ceil(len(xarr)*len(xarr[0])/512)
     _mandelbrot_cuda[nblocks, 512](xarr, yarr, nmax, res_mandel)
     return res_mandel
 
