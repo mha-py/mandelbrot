@@ -15,4 +15,6 @@ how "curious" the network is about this image. If it is new to the network, ther
 the network has already seen images similar to the one given.<br>
 While the agent is going through a level, the autoencoder is trained on the image the agent sees.
 
-<img src="animated.gif" width="300px" />
+<p align="center">
+<img src="animated.gif" width="300px"  />
+</p>
