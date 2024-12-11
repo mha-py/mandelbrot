@@ -270,7 +270,7 @@ def mandel_byreference(xarr, yarr, nmax, series):
 
 
 @cuda.jit
-def _mandel_byreference_cuda(xarr, yarr, nmax, series, nstart, xstart, ystart, res_mandel):
+def __mandel_byreference_cuda(xarr, yarr, nmax, series, nstart, xstart, ystart, res_mandel):
     '''Like `mandel_byreference` but on cuda devic
     Expects flattened xarr and yarr, and result will be also flattened
     '''
@@ -321,7 +321,7 @@ def _mandel_byreference_cuda(xarr, yarr, nmax, series, nstart, xstart, ystart, r
     
     
     
-def mandel_byreference_cuda(xarr, yarr, nmax, series, nstart=0, xstart=None, ystart=None):
+def _mandel_byreference_cuda(xarr, yarr, nmax, series, nstart=0, xstart=None, ystart=None):
     '''Determines the escape time for each point in the meshgrid of xarr, yarr.
     Wraps the actual cuda function
     '''
@@ -337,9 +337,12 @@ def mandel_byreference_cuda(xarr, yarr, nmax, series, nstart=0, xstart=None, yst
         ystart = np.empty_like(yarr)
         
     res_mandel = np.zeros_like(xarr)
-    _mandel_byreference_cuda[int(np.ceil(N/512)), 512](xarr, yarr, nmax, np.array(series), nstart, xstart, ystart, res_mandel)
+    __mandel_byreference_cuda[int(np.ceil(N/512)), 512](xarr, yarr, nmax, np.array(series), nstart, xstart, ystart, res_mandel)
     return res_mandel.reshape(shape)
     
-    
-    
+def mandel_byreference_cuda(xarr, yarr, nmax):
+    midx = (xarr.max()+xarr.min())/2
+    midy = (yarr.min()+yarr.min())/2
+    n, series, coeff1, coeff2, coeff3 = f_highprecision(mpf(midx), mpf(midy), nmax)
+    return _mandel_byreference_cuda(xarr-midx, yarr-midy, nmax, series)
     
